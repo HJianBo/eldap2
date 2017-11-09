@@ -1,4 +1,4 @@
--module(eldap).
+-module(eldap2).
 %%% --------------------------------------------------------------------
 %%% Created:  12 Oct 2000 by Tobbe <tnt@home.se>
 %%% Function: Erlang client LDAP implementation according RFC 2251,2253
@@ -493,7 +493,7 @@ tcp_opts_error(Opt, Cpid) ->
 %%% connection is made.
 
 try_connect([Host|Hosts], Data) ->
-    TcpOpts = [{packet, asn1}, {active,false}],
+    TcpOpts = [{packet, asn1}, {active,once}],
     try do_connect(Host, Data, TcpOpts) of
 	{ok,Fd} -> {ok,Data#eldap{host = Host, fd   = Fd}};
 	Err    ->
@@ -606,8 +606,24 @@ loop(Cpid, Data) ->
 	{Cpid, 'EXIT', Reason} ->
 	    ?PRINT("Got EXIT from Cpid, reason=~p~n",[Reason]),
 	    exit(Reason);
+   
+    {tcp_closed, _Sock} ->
+        ?PRINT("Got tcp_closed from ~p~n", [_Sock]),
+        exit(tcp_closed);
 
-	_XX ->
+    {tcp_error, _Sock, Reason} ->
+        ?PRINT("Got tcp_error from ~p, reason: ~p~n", [_Sock, Reason]),
+        exit({tcp_error, Reason});
+    
+    {ssl_closed, _Sock} ->
+        ?PRINT("Got ssl_closed from ~p~n", [_Sock]),
+        exit(ssl_closed);
+    
+    {ssl_error, _Sock, Reason} ->
+        ?PRINT("Got ssl_error from ~p, reason: ~p~n", [_Sock, Reason]),
+        exit({ssl_error, Reason});
+	
+    _XX ->
 	    ?PRINT("loop got: ~p~n",[_XX]),
 	    ?MODULE:loop(Cpid, Data)
 
@@ -1002,10 +1018,14 @@ do_send(S, Data, Bytes) when Data#eldap.using_tls == false ->
 do_send(S, Data, Bytes) when Data#eldap.using_tls == true ->
     ssl:send(S, Bytes).
 
-do_recv(S, #eldap{using_tls=false, timeout=Timeout}, Len) ->
-    gen_tcp:recv(S, Len, Timeout);
-do_recv(S, #eldap{using_tls=true, timeout=Timeout}, Len) ->
-    ssl:recv(S, Len, Timeout).
+%do_recv(S, #eldap{using_tls=false, timeout=Timeout}, Len) ->
+%    gen_tcp:recv(S, Len, Timeout);
+%do_recv(S, #eldap{using_tls=true, timeout=Timeout}, Len) ->
+%    ssl:recv(S, Len, Timeout).
+
+%% len is unused now!
+do_recv(S, Data, 0) ->
+    recv_once(S, Data).
 
 recv_response(S, Data) ->
     case do_recv(S, Data, 0) of
@@ -1016,6 +1036,23 @@ recv_response(S, Data) ->
 	    end;
 	{error,Reason} ->
 	    throw({gen_tcp_error, Reason})
+    end.
+
+recv_once(S, #eldap{using_tls=false, timeout=Timeout}) ->
+    receive
+        {tcp, S, Data}         -> inet:setopts(S, [{active, once}]), {ok, Data};
+        {tcp_closed, S}        -> {error, closed};
+        {tcp_error, S, Reason} -> {error, Reason}
+    after Timeout ->
+        {error, timeout}
+    end;
+recv_once(S, #eldap{using_tls=true, timeout=Timeout}) ->
+    receive
+        {ssl, S, Data}         -> ssl:setopts(S, [{active, once}]), {ok, Data};
+        {ssl_closed, S}        -> {error, closed};
+        {ssl_error, S, Reason} -> {error, Reason}
+    after Timeout ->
+        {error, timeout}
     end.
 
 %%% Check for expected kind of reply
